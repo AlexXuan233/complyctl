@@ -1,0 +1,130 @@
+name: integration_test.yml
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+env:
+  COMPLYTIME_DEV_MODE: 1
+
+jobs:
+  integration-test:
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:latest
+    steps:
+      # Checkout the code from the repository
+      - name: Checkout code
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+#      - name: Setup lima
+#        uses: lima-vm/lima-actions/setup@v1
+#        id: lima-actions-setup
+#
+#      - name: Cache lima
+#        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809  # v4.2.4
+#        with:
+#          path: ~/.cache/lima
+#          key: lima-${{ steps.lima-actions-setup.outputs.version }}
+#
+#      - name: Start a fedora vm and enter shell
+#        run: |
+#          limactl start --name=default --cpus=1 --memory=1 --network=lima:user-v2 template://fedora
+#          lima sudo dnf install wget make scap-security-guide git go tree -y
+#          lima
+#
+#      - run: |
+#          cp -r /home/runner/work/complyctl/complyctl /home/runner
+#          cd /home/runner/complyctl
+#          pwd
+#          ls -l
+
+      # Step 2: Set up Go environment
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: './go.mod'
+
+      # Install dependency on fedora
+      - name: Install dependency
+        run: dnf install wget make scap-security-guide git tree -y
+
+      # Configure Git for safe directory
+      - name: Configure Git for safe directory
+        run: git config --global --add safe.directory /__w/complyctl/complyctl
+
+      # Build complyctl
+      - name: Build complyctl
+        run: make build
+
+      # Configure complyctl
+      - name: Config compyctl
+        run: |
+          cp ./bin/complyctl /usr/local/bin
+          complyctl list 2>/dev/null || true
+          # download cusp OSCAL content
+          wget https://raw.githubusercontent.com/ComplianceAsCode/oscal-content/refs/heads/main/profiles/fedora-cusp_fedora-default/profile.json -O $HOME/.local/share/complytime/controls/cusp_profile.json
+          wget https://raw.githubusercontent.com/ComplianceAsCode/oscal-content/refs/heads/main/catalogs/cusp_fedora/catalog.json -O $HOME/.local/share/complytime/controls/cusp_catalog.json
+          wget https://raw.githubusercontent.com/ComplianceAsCode/oscal-content/refs/heads/main/component-definitions/fedora/fedora-cusp_fedora-default/component-definition.json -O $HOME/.local/share/complytime/bundles/cusp_component-definition.json
+          # update trestle path
+          sed -i 's|trestle://catalogs/cusp_fedora/catalog.json|trestle://controls/cusp_catalog.json|' $HOME/.local/share/complytime/controls/cusp_profile.json
+          sed -i 's|trestle://profiles/fedora-cusp_fedora-default/profile.json|trestle://controls/cusp_profile.json|' $HOME/.local/share/complytime/bundles/cusp_component-definition.json
+          cp -rp bin/openscap-plugin $HOME/.local/share/complytime/plugins
+          checksum=$(sha256sum $HOME/.local/share/complytime/plugins/openscap-plugin| cut -d ' ' -f 1 )
+          cat > $HOME/.local/share/complytime/plugins/c2p-openscap-manifest.json << EOF
+          {
+            "metadata": {
+              "id": "openscap",
+              "description": "My openscap plugin",
+              "version": "0.0.1",
+              "types": [
+                "pvp"
+              ]
+            },
+            "executablePath": "openscap-plugin",
+            "sha256": "$checksum",
+            "configuration": [
+              {
+                "name": "workspace",
+                "description": "Directory for writing plugin artifacts",
+                "required": true
+              },
+              {
+                "name": "profile",
+                "description": "The OpenSCAP profile to run for assessment",
+                "required": true
+              },
+              {
+                "name": "datastream",
+                "description": "The OpenSCAP datastream to use. If not set, the plugin will try to determine it based on system information",
+                "required": false
+              },
+              {
+                "name": "policy",
+                "description": "The name of the generated tailoring file",
+                "default": "tailoring_policy.xml",
+                "required": false
+              },
+              {
+                "name": "arf",
+                "description": "The name of the generated ARF file",
+                "default": "arf.xml",
+                "required": false
+              },
+              {
+                "name": "results",
+                "description": "The name of the generated results file",
+                "default": "results.xml",
+                "required": false
+              }
+            ]
+          }
+          EOF
+
+      - name: Test complyctl
+        run: |
+          ls -l
+          tree $HOME/.local/share/complytime/
+          complyctl list
