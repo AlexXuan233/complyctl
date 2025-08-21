@@ -17,7 +17,7 @@ runs:
   steps:
     # Install dependency on fedora
     - name: Install dependency
-      run: dnf install wget make scap-security-guide git jq -y
+      run: dnf install wget make scap-security-guide git jq gh -y
       shell: bash
 
     # Configure Git for safe directory

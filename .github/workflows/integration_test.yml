@@ -5,21 +5,24 @@ on:
     branches:
       - main
   pull_request:
-    types:
-      - opened
-      - synchronize
 
 env:
   COMPLYTIME_DEV_MODE: 1
+  PRODUCT: fedora
+  CATALOG: cusp_fedora
+  PROFILE: fedora-cusp_fedora-default
 
 permissions:
   contents: read
 
 jobs:
-  integration-test:
+  integration-test-fedora:
     runs-on: ubuntu-latest
     container:
       image: fedora:latest
+    strategy:
+      matrix:
+        assessment-plan-status: ["original", "customized"]
     steps:
       # Checkout the code from the repository
       - name: Checkout code
@@ -30,11 +33,83 @@ jobs:
         uses: ./.github/actions/setup-complyctl
         # This is the test data for a specific product, and it may be updated in the future if necessary.
         with:
-          product: 'fedora'
-          catalog: 'cusp_fedora'
-          profile: 'fedora-cusp_fedora-default'
+          product: $PRODUCT
+          catalog: $CATALOG
+          profile: $PROFILE
 
-      # Test complyctl
-      - name: Test complyctl
+      - name: Test complyctl list
         run: |
-          complyctl list --plain
+          LIST_OUTPUT=$(complyctl list --plain)
+          echo $LIST_OUTPUT
+          echo $LIST_OUTPUT | grep -q "$CATALOG"
+
+      # Test with original assessment-plan
+
+      - name: Test complyctl plan
+        if: ${{ matrix.assessment-plan-status == 'original'}}
+        run: complyctl plan $CATALOG
+
+      # Test with customized assessment-plan
+
+      - name: Test complyctl plan dry run
+        if: ${{ matrix.assessment-plan-status == 'customized'}}
+        run: complyctl plan $CATALOG --dry-run --out config_plan.yml
+
+      # Customize a plan config file, only include one control with one rule
+      - name: Customize plan config
+        if: ${{ matrix.assessment-plan-status == 'customized'}}
+        run: |
+          cat << EOF > config.yml
+          frameworkId: cusp_fedora
+          includeControls:
+            - controlId: cusp_fedora_4-1
+              controlTitle: Account Protection
+              includeRules:
+                - accounts_umask_etc_login_defs
+              selectParameters:
+                - name: var_accounts_user_umask
+                  value: "027"
+          EOF
+
+      - name: Test complyctl plan with customized config
+        if: ${{ matrix.assessment-plan-status == 'customized'}}
+        run: complyctl plan $CATALOG --scope-config config.yml
+
+      # Validate OSCAL assessment-plan using go-oscal
+      - name: Validate assessment-plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # download go-oscal executable
+          gh release download --pattern "go-oscal_*_Linux_amd64" -R defenseunicorns/go-oscal
+          GO_OSCAL_EXECUTABLE=$(ls go-oscal*)
+          chmod +x $GO_OSCAL_EXECUTABLE
+          # validation 
+          ./$GO_OSCAL_EXECUTABLE validate -f complytime/assessment-plan.json 
+
+      - name: Test complyctl generate
+        run: complyctl generate
+
+      - name: Test complyctl scan
+        run: complyctl scan --with-md
+
+      # Check content_rule_accounts_umask_etc_login_defs scan result, it should be fail
+      - name: Check assessment-result
+        run: |
+          jq -e -r '.["assessment-results"].results[].observations[] |
+          select(.title == "xccdf_org.ssgproject.content_rule_accounts_umask_etc_login_defs").subjects[].props[] | 
+          select(.name=="result").value == "fail"' complytime/assessment-results.json
+
+      # Update /etc/login.defs UMASK to 027
+      - name: Update login defs umask
+        run: sed -i 's/^UMASK\t*022/UMASK\t027/' /etc/login.defs
+
+      - name: Scan again
+        run: complyctl scan --with-md
+
+      # Check content_rule_accounts_umask_etc_login_defs scan result, it should be pass
+      - name: Check assessment-result after modify login defs umask
+        run: |
+          jq -e -r '.["assessment-results"].results[].observations[] | 
+          select(.title == "xccdf_org.ssgproject.content_rule_accounts_umask_etc_login_defs").subjects[].props[] | 
+          select(.name=="result").value == "pass"' complytime/assessment-results.json
