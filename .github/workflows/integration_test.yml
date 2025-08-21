@@ -5,12 +5,12 @@ on:
     branches:
       - main
   pull_request:
-    types:
-      - opened
-      - synchronize
 
 env:
   COMPLYTIME_DEV_MODE: 1
+  PRODUCT: fedora
+  CATALOG: cusp_fedora
+  PROFILE: fedora-cusp_fedora-default
 
 permissions:
   contents: read
@@ -20,6 +20,9 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: fedora:latest
+    strategy:
+      matrix:
+        assessment-plan-status: ["original", "customized"]
     steps:
       # Checkout the code from the repository
       - name: Checkout code
@@ -30,11 +33,131 @@ jobs:
         uses: ./.github/actions/setup-complyctl
         # This is the test data for a specific product, and it may be updated in the future if necessary.
         with:
-          product: 'fedora'
-          catalog: 'cusp_fedora'
-          profile: 'fedora-cusp_fedora-default'
+          product: $PRODUCT
+          catalog: $CATALOG
+          profile: $PROFILE
 
-      # Test complyctl
-      - name: Test complyctl
+      - name: Test complyctl list
         run: |
-          complyctl list --plain
+          LIST_OUTPUT=$(complyctl list --plain)
+          echo $LIST_OUTPUT
+          echo $LIST_OUTPUT | grep -q "$CATALOG"
+
+      - name: Test complyctl plan
+        if: ${{ matrix.assessment-plan-status == 'original'}}
+        run: complyctl plan $CATALOG
+
+      - name: Test complyctl plan dry run
+        if: ${{ matrix.assessment-plan-status == 'customized'}}
+        run: complyctl plan $CATALOG --dry-run --out config_plan.yml
+
+      - name: Customize plan config
+        if: ${{ matrix.assessment-plan-status == 'customized'}}
+        run: |
+          cat << EOF > config.yml
+          frameworkId: cusp_fedora
+          includeControls:
+            - controlId: cusp_fedora_4-1
+              controlTitle: Account Protection
+              includeRules:
+                - accounts_umask_etc_login_defs
+              selectParameters:
+                - name: var_accounts_user_umask
+                  value: "027"
+          EOF
+
+      - name: Test complyctl plan with customized config
+        if: ${{ matrix.assessment-plan-status == 'customized'}}
+        run: complyctl plan $CATALOG --scope-config config.yml
+
+      # Validate OSCAL assessment-plan using go-oscal
+      - name: Validate assessment-plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # download go-oscal executable
+          gh release download --pattern "go-oscal_*_Linux_amd64" -R defenseunicorns/go-oscal
+          GO_OSCAL_EXECUTABLE=$(ls | grep go-oscal)
+          chmod +x $GO_OSCAL_EXECUTABLE
+          # validation 
+          ./$GO_OSCAL_EXECUTABLE validate -f complytime/assessment-plan.json 
+
+      - name: Test complyctl generate
+        run: complyctl generate
+
+      - name: Test complyctl scan
+        run: complyctl scan --with-md
+
+      - name: Check assessment-result
+        run: |
+          jq -e -r '.["assessment-results"].results[].observations[] |
+          select(.title == "xccdf_org.ssgproject.content_rule_accounts_umask_etc_login_defs").subjects[].props[] | 
+          select(.name=="result").value == "fail"' complytime/assessment-results.json
+
+      - name: Update login defs umask
+        run: sed -i 's/^UMASK\t*022/UMASK\t027/' /etc/login.defs
+
+      - name: Scan again
+        run: complyctl scan --with-md
+
+      - name: Check assessment-result after modify login defs umask
+        run: |
+          jq -e -r '.["assessment-results"].results[].observations[] | 
+          select(.title == "xccdf_org.ssgproject.content_rule_accounts_umask_etc_login_defs").subjects[].props[] | 
+          select(.name=="result").value == "pass"' complytime/assessment-results.json
+
+#  with-modified-assessment-plan:
+#    runs-on: ubuntu-latest
+#    container:
+#      image: fedora:latest
+#    steps:
+#      # Checkout the code from the repository
+#      - name: Checkout code
+#        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+#
+#      # Setup complyctl for further testing
+#      - name: Setup compyctl
+#        uses: ./.github/actions/setup-complyctl
+#        # This is the test data for a specific product, and it may be updated in the future if necessary.
+#        with:
+#          product: $PRODUCT
+#          catalog: $CATALOG
+#          profile: $PROFILE
+#
+#      - name: Test complyctl list
+#        run: |
+#          LIST_OUTPUT=$(complyctl list --plain)
+#          echo $LIST_OUTPUT
+#          echo $LIST_OUTPUT | grep -q "$CATALOG"
+#
+#      - name: Test complyctl plan dry run
+#        run: |
+#          complyctl plan $CATALOG --dry-run --out config_plan.yml
+#
+#      - name: Modify plan config.yml
+#        run: |
+#          pass
+#
+#      - name: Test complyctl generate
+#        run: complyctl generate
+#
+#      - name: Test complyctl scan
+#        run: complyctl scan
+#
+#      - name: Check assessment-result
+#        run: |
+#          jq -e -r '.["assessment-results"].results[].observations[] |
+#          select(.title == "xccdf_org.ssgproject.content_rule_accounts_umask_etc_login_defs").subjects[].props[] |
+#          select(.name=="result").value == "fail"' complytime/assessment-results.json
+#
+#      - name: Update login defs umask
+#        run: sed -i 's/^UMASK\t*022/UMASK\t027/' /etc/login.defs
+#
+#      - name: Scan again
+#        run: complyctl scan
+#
+#      - name: Check assessment-result after modify login defs umask
+#        run: |
+#          jq -e -r '.["assessment-results"].results[].observations[] |
+#          select(.title == "xccdf_org.ssgproject.content_rule_accounts_umask_etc_login_defs").subjects[].props[] |
+#          select(.name=="result").value == "pass"' complytime/assessment-results.json
