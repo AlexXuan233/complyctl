@@ -20,6 +20,15 @@ jobs:
     - centos-stream-9-x86_64
     - centos-stream-10-x86_64
 
+- job: tests
+  trigger: pull_request
+  targets:
+    - fedora-rawhide-x86_64
+    - fedora-43-x86_64
+    - fedora-42-x86_64
+    - centos-stream-9-x86_64
+    - centos-stream-10-x86_64
+
 # https://packit.dev/docs/fedora-releases-guide
 # Propose Downstream PRs once a Upstream release is out
 - job: propose_downstream
